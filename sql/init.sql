@@ -7,8 +7,22 @@ CREATE TABLE IF NOT EXISTS produtos (
     title VARCHAR(255) NOT NULL,
     price NUMERIC(10, 2) NOT NULL,
     category VARCHAR(255) NOT NULL,
+    data_referencia DATE NOT NULL,        -- chave de negócio
     dag_run_id  VARCHAR(250),          -- rastreabilidade: qual run gerou o registro
     inserido_em TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS metricas (
+    id SERIAL PRIMARY KEY,
+    categoria VARCHAR(255) NOT NULL,
+    data_referencia DATE NOT NULL,
+    dag_run_id VARCHAR(250),
+    quantidade INTEGER NOT NULL,
+    media NUMERIC(10, 2) NOT NULL,
+    maximo NUMERIC(10, 2) NOT NULL,
+    minimo NUMERIC(10, 2) NOT NULL,
+    inserido_em TIMESTAMP DEFAULT NOW(),
+    UNIQUE (categoria, data_referencia)  -- idempotência no banco
 );
 
 -- Tabela de log de execuções (usada na extensão do lab)
@@ -32,5 +46,5 @@ GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO shop;
 -- Mensagem de confirmação
 DO $$ BEGIN
     RAISE NOTICE 'Banco inicializado com sucesso!';
-    RAISE NOTICE 'Tabelas: produtos, etl_log;
+    RAISE NOTICE 'Tabelas: produtos, metricas, etl_log';
 END $$;

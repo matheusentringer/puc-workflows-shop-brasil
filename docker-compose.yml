@@ -7,12 +7,17 @@
 #   docker compose ps             → verifica saúde dos containers
 #   docker compose logs -f        → acompanha logs em tempo real
 #   docker compose down -v        → derruba e apaga volumes
+#
+# UI do banco Shop (Adminer): http://localhost:8081
+#   Sistema: PostgreSQL | Servidor: postgres-shop | Usuário: shop
+#   Senha: shop123 | Base: shopdb
 # =============================================================================
 
 x-airflow-common: &airflow-common
   image: apache/airflow:2.9.3-python3.11
   environment: &airflow-common-env
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__DEFAULT_TIMEZONE: "America/Sao_Paulo"
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres-meta/airflow
     AIRFLOW__CORE__FERNET_KEY: "46BKJoQYlPPOexq0OhDZnIlNepKFf87WFwLt0nfd7cA="
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
@@ -41,6 +46,9 @@ services:
       POSTGRES_USER: airflow
       POSTGRES_PASSWORD: airflow
       POSTGRES_DB: airflow
+      PGTZ: America/Sao_Paulo
+      TZ: America/Sao_Paulo
+      
     volumes:
       - postgres-meta-data:/var/lib/postgresql/data
     healthcheck:
@@ -59,6 +67,8 @@ services:
       POSTGRES_USER: shop
       POSTGRES_PASSWORD: shop123
       POSTGRES_DB: shopdb
+      PGTZ: America/Sao_Paulo
+      TZ: America/Sao_Paulo
     volumes:
       - postgres-shop-data:/var/lib/postgresql/data
       - ./sql/init.sql:/docker-entrypoint-initdb.d/init.sql
@@ -71,6 +81,22 @@ services:
       start_period: 5s
     networks:
       - airflow-net
+
+  # ── UI web para visualizar o banco shopdb (Adminer) ─────────────────────────
+  adminer:
+    image: adminer:4.8.1
+    container_name: shop-db-admin
+    ports:
+      - "8081:8080"
+    environment:
+      ADMINER_DEFAULT_SERVER: postgres-shop
+      ADMINER_DESIGN: pepa-linha
+    depends_on:
+      postgres-shop:
+        condition: service_healthy
+    networks:
+      - airflow-net
+    restart: unless-stopped
 
   # ── Inicialização do banco de metadados (roda uma vez e sai) ────────────────
   airflow-init:
