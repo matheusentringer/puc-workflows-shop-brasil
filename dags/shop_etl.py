@@ -39,8 +39,20 @@ def shop_etl():
         data_ref = pendulum.now(TZ_BRASILIA).to_date_string()
         log.info("Data de referência (Brasília): %s", data_ref)
         return data_ref
+
+    def alerta_falha(context):
+        log.error("ALERTA: falha em %s", context["task_instance"].task_id)
+    def alerta_retry(context):
+        log.warning("RETRY: tentativa %s", context["task_instance"].try_number)
+    def alerta_sucesso(context):
+        log.info("SUCESSO: busca concluída")
     
-    @task(task_id="buscar_produtos")
+    @task(
+        task_id="buscar_produtos",
+        on_failure_callback=alerta_falha,
+        on_retry_callback=alerta_retry,
+        on_success_callback=alerta_sucesso,
+        )
     def buscar_produtos() -> list[dict]:
 
         import requests # pyright: ignore[reportMissingModuleSource]
@@ -48,14 +60,18 @@ def shop_etl():
         url = "https://fakestoreapi.com/products"
 
         log.info("Buscando dados da API")
-        response = requests.get(url, timeout=30)
-        response.raise_for_status()
+        try:
+            response = requests.get(url, timeout=30)
+            response.raise_for_status()
+            resultados = response.json()
 
-        resultados = response.json()
+            log.info("Total de produtos coletados: %s", len(resultados))
 
-        log.info("Total de produtos coletados: %s", len(resultados))
+            return resultados
 
-        return resultados
+        except Exception as e:
+            log.error("Erro ao buscar produtos: %s", e)
+            raise
 
 
     @task(task_id="salvar_no_banco")
@@ -132,7 +148,7 @@ def shop_etl():
             raise
 
 
-    @task(task_id="calcular_metricas")
+    @task(task_id="calcular_metricas", pool="ecommerce_pool")
     def calcular_metricas(categoria: str, data_referencia: str, **context):
 
         from airflow.providers.postgres.hooks.postgres import PostgresHook # pyright: ignore[reportMissingImports]
