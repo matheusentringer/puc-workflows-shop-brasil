@@ -2,7 +2,8 @@ import logging
 from datetime import timedelta
 import pendulum  # pyright: ignore[reportMissingImports]
 from airflow.decorators import dag, task  # pyright: ignore[reportMissingImports]
-from airflow.utils.task_group import TaskGroup  # pyright: ignore[reportMissingImports]
+from airflow.utils.task_group import TaskGroup
+from plugins.operators.validar_produtos_operator import ValidarProdutosOperator  # pyright: ignore[reportMissingImports]
 
 log = logging.getLogger(__name__)
 
@@ -245,7 +246,15 @@ def shop_etl():
     with TaskGroup('ingestao') as ingestao_group:
         data_ref = obter_data_referencia()
         dados_brutos = buscar_produtos()
+
+        validar = ValidarProdutosOperator(
+            task_id="validar_produtos",
+            upstream_task_id="ingestao.buscar_produtos",  # id completo com TaskGroup
+        )
+
         total_de_valores = salvar_no_banco(dados_brutos, data_ref)
+
+        dados_brutos >> validar >> total_de_valores
 
     with TaskGroup('analise') as analise_group:
         categorias = extrair_categorias(data_ref)
