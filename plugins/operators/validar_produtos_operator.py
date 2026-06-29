@@ -26,15 +26,28 @@ class ValidarProdutosOperator(BaseOperator):
         ]
 
     def execute(self, context: Context):
-        ti = context["ti"]
-        # Lê o XCom da task de busca — operador clássico não recebe via argumento TaskFlow
-        produtos = ti.xcom_pull(task_ids=self.upstream_task_id)
+        import json
+        from pathlib import Path
 
-        if not produtos:
-            raise ValueError("Nenhum produto recebido para validação")
+        ti = context["ti"]
+        # XCom traz o caminho do JSON gerado por buscar_produtos
+        arquivo = ti.xcom_pull(task_ids=self.upstream_task_id)
+
+        if not arquivo:
+            raise ValueError("Nenhum arquivo de produtos recebido para validação")
+
+        if not isinstance(arquivo, str):
+            raise ValueError(f"Esperava caminho str, recebeu {type(arquivo)}")
+
+        path = Path(arquivo)
+        if not path.exists():
+            raise ValueError(f"Arquivo não encontrado: {path}")
+
+        with path.open(encoding="utf-8") as f:
+            produtos = json.load(f)
 
         if not isinstance(produtos, list):
-            raise ValueError(f"Esperava list, recebeu {type(produtos)}")
+            raise ValueError(f"Esperava list no JSON, recebeu {type(produtos)}")
 
         for i, produto in enumerate(produtos):
             if not isinstance(produto, dict):

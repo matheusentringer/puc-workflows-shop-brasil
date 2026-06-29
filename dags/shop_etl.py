@@ -4,6 +4,8 @@ Pipeline ETL ShopBrasil — FakeStore API → PostgreSQL → métricas por categ
 Topologia:
   ingestão (linear)  →  buscar → validar → salvar produtos
   análise (fan-out/in) →  categorias → calcular_metricas[N] → salvar_metricas
+
+Dados brutos da API são gravados em JSON em data/staging/; o XCom carrega só o caminho.
 """
 
 import logging
@@ -22,6 +24,14 @@ log = logging.getLogger(__name__)
 
 POSTGRES_CONN_ID = "postgres_shop"      # Connection criada pelo airflow-init
 TZ_BRASILIA = "America/Sao_Paulo"
+STAGING_DIR = "/opt/airflow/data/staging"  # volume montado no docker-compose
+
+
+def _arquivo_produtos(run_id: str) -> str:
+    """Gera caminho único por run (run_id sanitizado para nome de arquivo)."""
+    import re
+    safe_id = re.sub(r"[^\w\-]", "_", run_id)
+    return f"{STAGING_DIR}/{safe_id}_produtos.json"
 
 # =============================================================================
 # Callbacks de alerta (requisitos 3.4 e 4.3)
@@ -101,10 +111,13 @@ def shop_etl():
         on_retry_callback=alerta_retry,
         on_success_callback=alerta_sucesso,
     )
-    def buscar_produtos() -> list[dict]:
+    def buscar_produtos(**context) -> str:
         # Import interno: não carrega requests no parse da DAG pelo scheduler
+        import json
+        from pathlib import Path
         import requests # pyright: ignore[reportMissingModuleSource]
 
+        run_id = context["run_id"]
         url = "https://fakestoreapi.com/products"
 
         log.info("Buscando dados da API")
@@ -115,17 +128,28 @@ def shop_etl():
 
             log.info("Total de produtos coletados: %s", len(resultados))
 
-            return resultados  # XCom automático → downstream via TaskFlow
+            # Persiste em disco — XCom carrega só o caminho do arquivo
+            arquivo = Path(_arquivo_produtos(run_id))
+            arquivo.parent.mkdir(parents=True, exist_ok=True)
+            with arquivo.open("w", encoding="utf-8") as f:
+                json.dump(resultados, f, ensure_ascii=False)
+
+            log.info("Produtos salvos em %s", arquivo)
+            return str(arquivo)
 
         except Exception as e:
             log.error("Erro ao buscar produtos: %s", e)
             raise  # re-raise aciona retry configurado no DEFAULT_ARGS
 
     @task(task_id="salvar_no_banco")
-    def salvar_no_banco(registros: list[dict], data_referencia: str, **context) -> int:
+    def salvar_no_banco(arquivo_produtos: str, data_referencia: str, **context) -> int:
+        import json
         from airflow.providers.postgres.hooks.postgres import PostgresHook # pyright: ignore[reportMissingImports]
 
         run_id = context["run_id"]
+
+        with open(arquivo_produtos, encoding="utf-8") as f:
+            registros = json.load(f)
 
         hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
         conn = hook.get_conn()
@@ -284,17 +308,17 @@ def shop_etl():
     # ── TaskGroup: Ingestão (topologia linear) ───────────────────────────────
     with TaskGroup("ingestao") as ingestao_group:
         data_ref = obter_data_referencia()
-        dados_brutos = buscar_produtos()
+        arquivo_produtos = buscar_produtos()
 
         validar = ValidarProdutosOperator(
             task_id="validar_produtos",
             upstream_task_id="ingestao.buscar_produtos",  # prefixo do TaskGroup no task_id
         )
 
-        total_de_valores = salvar_no_banco(dados_brutos, data_ref)
+        total_de_valores = salvar_no_banco(arquivo_produtos, data_ref)
 
         # Operador não recebe XCom via argumento — dependência explícita no grafo
-        dados_brutos >> validar >> total_de_valores
+        arquivo_produtos >> validar >> total_de_valores
 
     # ── TaskGroup: Análise (fan-out → fan-in) ────────────────────────────────
     with TaskGroup("analise") as analise_group:
