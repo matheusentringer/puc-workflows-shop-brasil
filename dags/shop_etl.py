@@ -13,6 +13,61 @@ log = logging.getLogger(__name__)
 
 POSTGRES_CONN_ID = "postgres_shop"      # Connection criada pelo airflow-init
 TZ_BRASILIA = "America/Sao_Paulo"
+SLA_PIPELINE = timedelta(hours=1)       # painel deve estar pronto até 1h após as 06:00
+
+# =============================================================================
+# Callbacks de alerta e SLA (requisitos 3.4 e 4.3)
+# =============================================================================
+
+def alerta_falha(context):
+    ti = context["task_instance"]
+    log.error(
+        "[ALERTA SIMULADO] Pipeline ShopBrasil FALHOU\n"
+        "  DAG: %s\n"
+        "  Task: %s\n"
+        "  Run: %s\n"
+        "  Tentativa: %s\n"
+        "  → E-mail simulado: pricing@shopbrasil.com\n"
+        "  → Slack simulado: #alertas-dados",
+        ti.dag_id,
+        ti.task_id,
+        context["run_id"],
+        ti.try_number,
+    )
+
+
+def alerta_retry(context):
+    ti = context["task_instance"]
+    log.warning(
+        "[RETRY] Task %s — tentativa %s (run: %s)",
+        ti.task_id,
+        ti.try_number,
+        context["run_id"],
+    )
+
+
+def alerta_sucesso(context):
+    ti = context["task_instance"]
+    log.info(
+        "[SUCESSO] Task %s concluída (run: %s)",
+        ti.task_id,
+        context["run_id"],
+    )
+
+
+def alerta_sla_miss(dag, task_list, blocking_task_list, slas, blocking_tis):
+    tasks_atrasadas = [t.task_id for t in task_list]
+    log.error(
+        "[SLA MISS SIMULADO] Pipeline ShopBrasil estourou o prazo de %s\n"
+        "  DAG: %s\n"
+        "  Tasks atrasadas: %s\n"
+        "  → E-mail simulado: admin@shopbrasil.com\n"
+        "  → Slack simulado: #alertas-dados",
+        SLA_PIPELINE,
+        dag.dag_id,
+        tasks_atrasadas,
+    )
+
 
 DEFAULT_ARGS = {
     "owner": "shop",
@@ -21,6 +76,9 @@ DEFAULT_ARGS = {
     "retry_exponential_backoff": True,   # 2min → 4min → 8min
     "email_on_failure": False,
     "email_on_retry": False,
+    "sla": SLA_PIPELINE,
+    "sla_miss_callback": alerta_sla_miss,
+    "on_failure_callback": alerta_falha,
 }
 
 @dag(
@@ -41,19 +99,11 @@ def shop_etl():
         log.info("Data de referência (Brasília): %s", data_ref)
         return data_ref
 
-    def alerta_falha(context):
-        log.error("ALERTA: falha em %s", context["task_instance"].task_id)
-    def alerta_retry(context):
-        log.warning("RETRY: tentativa %s", context["task_instance"].try_number)
-    def alerta_sucesso(context):
-        log.info("SUCESSO: busca concluída")
-    
     @task(
         task_id="buscar_produtos",
-        on_failure_callback=alerta_falha,
         on_retry_callback=alerta_retry,
         on_success_callback=alerta_sucesso,
-        )
+    )
     def buscar_produtos() -> list[dict]:
 
         import requests # pyright: ignore[reportMissingModuleSource]
