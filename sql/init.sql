@@ -1,17 +1,17 @@
 
-
---Tabela principal onde o DAG vai inserir os dados da API
+-- Snapshot idempotente de produtos brutos da API (DELETE + INSERT por data_referencia)
 CREATE TABLE IF NOT EXISTS produtos (
     id SERIAL PRIMARY KEY,
     product_id INT NOT NULL,
     title VARCHAR(255) NOT NULL,
     price NUMERIC(10, 2) NOT NULL,
     category VARCHAR(255) NOT NULL,
-    data_referencia DATE NOT NULL,        -- chave de negócio
-    dag_run_id  VARCHAR(250),          -- rastreabilidade: qual run gerou o registro
-    inserido_em TIMESTAMP DEFAULT NOW()
+    data_referencia DATE NOT NULL,        -- dia de negócio (calendário Brasília)
+    dag_run_id  VARCHAR(250),            -- rastreabilidade: qual run gerou o registro
+    inserido_em TIMESTAMP DEFAULT NOW()  -- auditoria: quando gravou fisicamente
 );
 
+-- Snapshot idempotente de métricas por categoria (painel diário)
 CREATE TABLE IF NOT EXISTS metricas (
     id SERIAL PRIMARY KEY,
     categoria VARCHAR(255) NOT NULL,
@@ -22,10 +22,10 @@ CREATE TABLE IF NOT EXISTS metricas (
     maximo NUMERIC(10, 2) NOT NULL,
     minimo NUMERIC(10, 2) NOT NULL,
     inserido_em TIMESTAMP DEFAULT NOW(),
-    UNIQUE (categoria, data_referencia)  -- idempotência no banco
+    UNIQUE (categoria, data_referencia)  -- garante 1 linha por categoria/dia no banco
 );
 
--- Tabela de log de execuções (usada na extensão do lab)
+-- Log técnico de execuções (extensão opcional do lab)
 CREATE TABLE IF NOT EXISTS etl_log (
     id          SERIAL PRIMARY KEY,
     dag_id      VARCHAR(250),
@@ -38,12 +38,10 @@ CREATE TABLE IF NOT EXISTS etl_log (
 );
 
 
---Permissões
+-- Permissões para o usuário da Connection postgres_shop
 GRANT ALL ON ALL TABLES IN SCHEMA public TO shop;
 GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO shop;
--- GRANT SELECT ON v_produtos TO shop;
 
--- Mensagem de confirmação
 DO $$ BEGIN
     RAISE NOTICE 'Banco inicializado com sucesso!';
     RAISE NOTICE 'Tabelas: produtos, metricas, etl_log';

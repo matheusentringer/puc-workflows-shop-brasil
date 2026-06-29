@@ -1,8 +1,17 @@
+"""
+Pipeline ETL ShopBrasil — FakeStore API → PostgreSQL → métricas por categoria.
+
+Topologia:
+  ingestão (linear)  →  buscar → validar → salvar produtos
+  análise (fan-out/in) →  categorias → calcular_metricas[N] → salvar_metricas
+"""
+
 import logging
 from datetime import timedelta
 import pendulum  # pyright: ignore[reportMissingImports]
 from airflow.decorators import dag, task  # pyright: ignore[reportMissingImports]
 from airflow.utils.task_group import TaskGroup
+# Airflow adiciona /opt/airflow/plugins ao sys.path — importa como "operators", não "plugins"
 from operators.validar_produtos_operator import ValidarProdutosOperator  # pyright: ignore[reportMissingImports]
 
 log = logging.getLogger(__name__)
@@ -16,9 +25,12 @@ TZ_BRASILIA = "America/Sao_Paulo"
 
 # =============================================================================
 # Callbacks de alerta (requisitos 3.4 e 4.3)
+# on_failure_callback no DEFAULT_ARGS vale para todas as tasks;
+# buscar_produtos adiciona retry/success específicos da ingestão crítica.
 # =============================================================================
 
 def alerta_falha(context):
+    """Simula envio de alerta após esgotar todos os retries da task."""
     ti = context["task_instance"]
     log.error(
         "[ALERTA SIMULADO] Pipeline ShopBrasil FALHOU\n"
@@ -36,6 +48,7 @@ def alerta_falha(context):
 
 
 def alerta_retry(context):
+    """Dispara a cada retry, antes da próxima tentativa."""
     ti = context["task_instance"]
     log.warning(
         "[RETRY] Task %s — tentativa %s (run: %s)",
@@ -46,6 +59,7 @@ def alerta_retry(context):
 
 
 def alerta_sucesso(context):
+    """Confirma conclusão bem-sucedida da task (usado na ingestão)."""
     ti = context["task_instance"]
     log.info(
         "[SUCESSO] Task %s concluída (run: %s)",
@@ -66,17 +80,18 @@ DEFAULT_ARGS = {
 @dag(
     dag_id="shop_etl",
     description="Pipeline de ETL para o projeto ShopBrasil",
-    schedule="0 6 * * *",   # Executa todos os dias às 06:00 (horário de Brasília)
+    schedule="0 6 * * *",   # 06:00 horário de Brasília (via start_date com TZ)
     start_date=pendulum.datetime(2024, 1, 1, tz=TZ_BRASILIA),
     catchup=False,
     default_args=DEFAULT_ARGS,
     tags=["shop", "etl", "airflow"],
-    max_active_runs=1,
+    max_active_runs=1,      # evita duas runs simultâneas competindo no mesmo dia
 )
 def shop_etl():
 
     @task(task_id="obter_data_referencia")
     def obter_data_referencia() -> str:
+        # Calendário civil de SP — idempotência por "hoje local", não por context["ds"]
         data_ref = pendulum.now(TZ_BRASILIA).to_date_string()
         log.info("Data de referência (Brasília): %s", data_ref)
         return data_ref
@@ -84,13 +99,12 @@ def shop_etl():
     @task(
         task_id="buscar_produtos",
         on_retry_callback=alerta_retry,
-        on_success_callback=alerta_sucesso
-
+        on_success_callback=alerta_sucesso,
     )
     def buscar_produtos() -> list[dict]:
-
+        # Import interno: não carrega requests no parse da DAG pelo scheduler
         import requests # pyright: ignore[reportMissingModuleSource]
-        
+
         url = "https://fakestoreapi.com/products"
 
         log.info("Buscando dados da API")
@@ -101,16 +115,14 @@ def shop_etl():
 
             log.info("Total de produtos coletados: %s", len(resultados))
 
-            return resultados
+            return resultados  # XCom automático → downstream via TaskFlow
 
         except Exception as e:
             log.error("Erro ao buscar produtos: %s", e)
-            raise
-
+            raise  # re-raise aciona retry configurado no DEFAULT_ARGS
 
     @task(task_id="salvar_no_banco")
     def salvar_no_banco(registros: list[dict], data_referencia: str, **context) -> int:
-
         from airflow.providers.postgres.hooks.postgres import PostgresHook # pyright: ignore[reportMissingImports]
 
         run_id = context["run_id"]
@@ -120,6 +132,7 @@ def shop_etl():
         cur = conn.cursor()
 
         try:
+            # Idempotência: re-run no mesmo dia substitui o snapshot (DELETE + INSERT)
             cur.execute(
                 "DELETE FROM produtos WHERE data_referencia = %s",
                 (data_referencia,),
@@ -136,7 +149,7 @@ def shop_etl():
                     r["price"],
                     r["category"],
                     data_referencia,
-                    run_id
+                    run_id,
                 )
                 for r in registros
             ]
@@ -149,7 +162,7 @@ def shop_etl():
             log.info("  run_id: %s | data: %s", run_id, data_referencia)
 
             return total
-            
+
         except Exception as e:
             conn.rollback()
             log.error("Erro ao inserir no banco: %s", e)
@@ -158,10 +171,8 @@ def shop_etl():
             cur.close()
             conn.close()
 
-
     @task(task_id="extrair_categorias")
     def extrair_categorias(data_referencia: str) -> list[str]:
-
         from airflow.providers.postgres.hooks.postgres import PostgresHook # pyright: ignore[reportMissingImports]
 
         hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
@@ -175,18 +186,17 @@ def shop_etl():
             categorias = [row[0] for row in rows]
 
             log.info("Categorias extraídas: %s", categorias)
-            return categorias
+            return categorias  # lista alimenta o .expand() — escala com novas categorias
 
         except Exception as e:
             log.error("Erro ao extrair categorias do banco")
             raise
 
-
     @task(task_id="calcular_metricas", pool="ecommerce_pool")
     def calcular_metricas(categoria: str, data_referencia: str, **context):
-
+        # pool limita a 2 instâncias paralelas (configurar ecommerce_pool no Airflow)
         from airflow.providers.postgres.hooks.postgres import PostgresHook # pyright: ignore[reportMissingImports]
-        
+
         hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
 
         log.info("Calculando métricas da categoria: %s", categoria)
@@ -196,10 +206,9 @@ def shop_etl():
                 SELECT price FROM produtos WHERE category = %s AND data_referencia = %s
             """
 
-            log.info("Buscando registros no banco")
             rows = hook.get_records(select_sql, parameters=(categoria, data_referencia))
 
-            prices = [float(row[0]) for row in rows]
+            prices = [float(row[0]) for row in rows]  # NUMERIC do PG vem como Decimal
             log.info("%i registros encontrados", len(prices))
 
             quantity = len(prices)
@@ -211,7 +220,7 @@ def shop_etl():
                 "quantidade": quantity,
                 "média": average,
                 "máximo": maximum,
-                "mínimo": minimum
+                "mínimo": minimum,
             })
 
             return {
@@ -219,16 +228,16 @@ def shop_etl():
                 "quantidade": quantity,
                 "media": average,
                 "maximo": maximum,
-                "minimo": minimum
+                "minimo": minimum,
             }
 
         except Exception as e:
             log.error("Erro ao calcular métricas: %s", e)
             raise
 
-
     @task(task_id="salvar_metricas")
     def salvar_metricas(resultados: list[dict], data_referencia: str, **context):
+        # Fan-in: resultados é list[dict] agregada automaticamente das tasks mapeadas
         from airflow.providers.postgres.hooks.postgres import PostgresHook # pyright: ignore[reportMissingImports]
         run_id = context["run_id"]
         hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
@@ -255,7 +264,7 @@ def shop_etl():
                     m["quantidade"],
                     m["media"],
                     m["maximo"],
-                    m["minimo"]
+                    m["minimo"],
                 )
                 for m in resultados
             ]
@@ -267,33 +276,33 @@ def shop_etl():
             log.info("✓ %d registros inseridos na tabela 'metricas'", total)
             log.info("  run_id: %s | data: %s", run_id, data_referencia)
 
-
         except Exception as e:
             conn.rollback()
             log.error("Erro ao salvar métricas no banco de dados: %s", e)
             raise
 
-
-
-
-    with TaskGroup('ingestao') as ingestao_group:
+    # ── TaskGroup: Ingestão (topologia linear) ───────────────────────────────
+    with TaskGroup("ingestao") as ingestao_group:
         data_ref = obter_data_referencia()
         dados_brutos = buscar_produtos()
 
         validar = ValidarProdutosOperator(
             task_id="validar_produtos",
-            upstream_task_id="ingestao.buscar_produtos",  # id completo com TaskGroup
+            upstream_task_id="ingestao.buscar_produtos",  # prefixo do TaskGroup no task_id
         )
 
         total_de_valores = salvar_no_banco(dados_brutos, data_ref)
 
+        # Operador não recebe XCom via argumento — dependência explícita no grafo
         dados_brutos >> validar >> total_de_valores
 
-    with TaskGroup('analise') as analise_group:
+    # ── TaskGroup: Análise (fan-out → fan-in) ────────────────────────────────
+    with TaskGroup("analise") as analise_group:
         categorias = extrair_categorias(data_ref)
+        # partial fixa data_referencia; expand cria uma task por categoria
         metricas = calcular_metricas.partial(data_referencia=data_ref).expand(categoria=categorias)
         salvar_metricas(metricas, data_ref)
 
-    ingestao_group >> analise_group     #analise só executa depois da ingestao
+    ingestao_group >> analise_group
 
 dag_instance = shop_etl()

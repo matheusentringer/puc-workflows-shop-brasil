@@ -1,14 +1,16 @@
-# plugins/operators/validar_produtos_operator.py
+"""
+Operador customizado (requisito opcional 4.1).
+
+Valida o schema mínimo dos produtos da FakeStore antes de persistir no banco.
+Reutilizável em outras DAGs via plugins/operators/.
+"""
 
 from airflow.models import BaseOperator
 from airflow.utils.context import Context
 
 
 class ValidarProdutosOperator(BaseOperator):
-    """
-    Valida o schema mínimo dos produtos retornados pela API
-    antes de persistir ou calcular métricas.
-    """
+    """Valida campos obrigatórios e tipos de cada produto retornado pela API."""
 
     def __init__(
         self,
@@ -17,13 +19,15 @@ class ValidarProdutosOperator(BaseOperator):
         **kwargs,
     ):
         super().__init__(**kwargs)
+        # task_id completo da task upstream (inclui prefixo do TaskGroup, se houver)
         self.upstream_task_id = upstream_task_id
         self.campos_obrigatorios = campos_obrigatorios or [
-            "id", "title", "price", "category"
+            "id", "title", "price", "category",
         ]
 
     def execute(self, context: Context):
         ti = context["ti"]
+        # Lê o XCom da task de busca — operador clássico não recebe via argumento TaskFlow
         produtos = ti.xcom_pull(task_ids=self.upstream_task_id)
 
         if not produtos:
@@ -53,4 +57,4 @@ class ValidarProdutosOperator(BaseOperator):
                 raise ValueError(f"Produto {i}: 'category' inválido")
 
         self.log.info("✓ %d produtos validados com sucesso", len(produtos))
-        return len(produtos)  # opcional: push XCom com total validado
+        return len(produtos)
